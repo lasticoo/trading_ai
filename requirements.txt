@@ -1,0 +1,11 @@
+pandas
+numpy
+requests
+tqdm
+pyarrow
+fastapi
+uvicorn
+pydantic
+sqlalchemy
+torch
+requests
