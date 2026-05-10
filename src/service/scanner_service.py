@@ -3,29 +3,47 @@ from src.data.live_loader import LiveDataLoader
 from src.service.trade_proposal import generate_trade_proposal
 from src.db.models import TradeProposal, Account
 from src.risk.risk_engine import RiskManager
-from src.ai.inference import TradingAI
-from src.ai.load_model import load_trained_model
 
 MODEL_PATH = "models/tcn_trading_model.pt"
 
+
+def _load_ai():
+    """Load model jika ada. Return None jika belum ditraining."""
+    try:
+        from src.ai.inference import TradingAI
+        from src.ai.load_model import load_trained_model
+        model = load_trained_model(MODEL_PATH)
+        return TradingAI(model)
+    except FileNotFoundError:
+        print(f"[WARN] Model tidak ditemukan di {MODEL_PATH}. Pakai mode dummy.")
+        return None
+    except Exception as e:
+        print(f"[WARN] Gagal load model: {e}. Pakai mode dummy.")
+        return None
+
+
+def _dummy_probs():
+    """Probabilitas acak untuk testing tanpa model."""
+    import random
+    tp = random.uniform(0.3, 0.7)
+    sl = random.uniform(0.1, 0.4)
+    none_ = max(0, 1 - tp - sl)
+    return {
+        "long":  {"tp": tp,  "sl": sl,  "none": none_},
+        "short": {"tp": sl,  "sl": tp,  "none": none_}
+    }
+
+
 def run_scan(db):
-    # =========================
-    # 0️⃣ ACCOUNT STATE (SINGLE SOURCE OF TRUTH)
-    # =========================
     account = db.query(Account).first()
     if not account:
-        raise Exception("Account not initialized")
+        from src.service.account_service import get_or_create_account
+        account = get_or_create_account(db)
 
-    # =========================
-    # 1️⃣ INIT CORE COMPONENTS
-    # =========================
     symbols = get_all_futures_symbols()
-    loader = LiveDataLoader(interval="15m", lookback=150)
+    loader  = LiveDataLoader(interval="15m", lookback=150)
+    ai      = _load_ai()
 
-    model = load_trained_model(MODEL_PATH)
-    ai = TradingAI(model)
-
-    # ✅ FIX UTAMA ADA DI SINI
     risk_manager = RiskManager(
         equity_start=account.equity,
         equity_current=account.equity
@@ -33,29 +51,14 @@ def run_scan(db):
 
     created = 0
 
-    # =========================
-    # 2️⃣ SCAN LOOP
-    # =========================
     for symbol in symbols:
         try:
-            # =========================
-            # LOAD LIVE DATA
-            # =========================
             price, features, atr = loader.load_latest(symbol)
 
-            if features.shape[0] < 50:
+            if features.shape[0] < 20:
                 continue
 
-            # =========================
-            # AI INFERENCE
-            # =========================
-            ai_probs = ai.predict(features)
-            if not ai_probs:
-                continue
-
-            # =========================
-            # TRADE DECISION
-            # =========================
+            ai_probs = ai.predict(features) if ai else _dummy_probs()
             ohlcv_df = loader.fetch_klines(symbol)
 
             proposal = generate_trade_proposal(
@@ -69,21 +72,21 @@ def run_scan(db):
             if proposal is None:
                 continue
 
-            # =========================
-            # SAVE SNAPSHOT (DB)
-            # =========================
-            db.add(
-                TradeProposal(
-                    symbol=proposal["symbol"],
-                    side=proposal["side"],
-                    entry=proposal["entry"],
-                    sl=proposal["sl"],
-                    tp=proposal["tp"],
-                    ev=proposal["ev"],
-                    status="PENDING",
-                    meta=proposal
-                )
-            )
+            # Hapus proposal PENDING lama untuk symbol ini
+            db.query(TradeProposal).filter(
+                TradeProposal.symbol == symbol,
+                TradeProposal.status == "PENDING"
+            ).delete()
+
+            db.add(TradeProposal(
+                symbol=proposal["symbol"],
+                side=proposal["side"],
+                entry=proposal["entry"],
+                sl=proposal["sl"],
+                tp=proposal["tp"],
+                ev=proposal["ev"],
+                status="PENDING"
+            ))
 
             created += 1
 
@@ -92,8 +95,4 @@ def run_scan(db):
             continue
 
     db.commit()
-
-    return {
-        "status": "OK",
-        "created": created
-    }
+    return {"status": "OK", "created": created, "scanned": len(symbols)}

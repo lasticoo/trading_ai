@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
+from pydantic import BaseModel
 
 from src.api.deps import get_db
 from src.service.account_service import (
@@ -8,34 +9,27 @@ from src.service.account_service import (
     apply_trade_result
 )
 
-router = APIRouter(
-    prefix="/account",
-    tags=["account"]
-)
+router = APIRouter(prefix="/account", tags=["account"])
 
-# =========================
-# GET ACCOUNT STATE
-# =========================
+
+class ApplyResultRequest(BaseModel):
+    r_multiple: float
+    risk_pct: float
+
+
 @router.get("/")
 def get_account(db: Session = Depends(get_db)):
     return get_account_state(db)
 
 
-# =========================
-# MANUAL UPDATE EQUITY
-# =========================
 @router.post("/update")
 def set_equity(equity: float, db: Session = Depends(get_db)):
     return update_equity(db, equity)
 
 
-# =========================
-# APPLY CLOSED TRADE RESULT
-# =========================
 @router.post("/apply-result")
 def apply_result(
-    r_multiple: float,
-    risk_pct: float,
+    payload: ApplyResultRequest,
     db: Session = Depends(get_db)
 ):
-    return apply_trade_result(db, r_multiple, risk_pct)
+    return apply_trade_result(db, payload.r_multiple, payload.risk_pct)
